@@ -155,7 +155,7 @@ function hasOGPack(order: ShopifyOrder): boolean {
 /**
  * Adds the free item directly to the order using Admin API and Order Edit operations
  */
-async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiResponse | null> {
+async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse | null> {
   if (!SHOPIFY_ADMIN_API_KEY || !OG_VARIANT_ID) {
     console.error('Missing required environment variables for API call');
     return null;
@@ -163,19 +163,36 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
 
   const graphqlEndpoint = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-04/graphql.json`;
   
-  // Convert numeric order ID to required Shopify GraphQL ID format
-  const orderGid = typeof orderId === 'number' || /^\d+$/.test(String(orderId))
-    ? `gid://shopify/Order/${orderId}`
-    : orderId;
-    
+  // We need to ensure we're using the correct order ID format
+  console.log('Raw order details:');
+  console.log('- id:', order.id);
+  console.log('- admin_graphql_api_id:', order.admin_graphql_api_id);
+  console.log('- order_number:', order.order_number);
+  
+  // The ID value must be the GID format or it won't work
+  let orderGid = order.admin_graphql_api_id;
+  
+  // If we don't have the GID format ID, try to construct it
+  if (!orderGid || !orderGid.startsWith('gid://')) {
+    const numericId = order.id;
+    if (numericId) {
+      orderGid = `gid://shopify/Order/${numericId}`;
+    }
+  }
+  
+  if (!orderGid) {
+    console.error('Unable to determine order GID from order data:', order);
+    throw new Error('Unable to determine order GID');
+  }
+  
   console.log(`Using order GID: ${orderGid}`);
   
   try {
-    // Step 1: Begin an order edit session - this is the first required step for editing an order
+    // Step 1: Begin an order edit session using the format from the docs
     console.log('Starting order edit session');
     const beginEditMutation = `
-      mutation {
-        orderEditBegin(id: "${orderGid}") {
+      mutation orderEditBegin($id: ID!) {
+        orderEditBegin(id: $id) {
           calculatedOrder {
             id
           }
@@ -194,7 +211,10 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: beginEditMutation
+        query: beginEditMutation,
+        variables: {
+          id: orderGid
+        }
       })
     });
 
@@ -230,11 +250,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     console.log(`Adding variant with GID: ${variantGid}`);
 
     const addVariantMutation = `
-      mutation {
+      mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
         orderEditAddVariant(
-          id: "${calculatedOrderId}", 
-          variantId: "${variantGid}", 
-          quantity: 1
+          id: $id,
+          variantId: $variantId,
+          quantity: $quantity
         ) {
           calculatedLineItem {
             id
@@ -254,7 +274,12 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: addVariantMutation
+        query: addVariantMutation,
+        variables: {
+          id: calculatedOrderId,
+          variantId: variantGid,
+          quantity: 1
+        }
       })
     });
 
@@ -285,16 +310,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     // Step 4: Add a 100% discount to make the item free
     console.log('Adding 100% discount to make item free');
     const addDiscountMutation = `
-      mutation {
+      mutation orderEditAddLineItemDiscount($discount: OrderEditAppliedDiscountInput!, $id: ID!, $lineItemId: ID!) {
         orderEditAddLineItemDiscount(
-          discount: {
-            description: "Free promotional item", 
-            value: {
-              percentage: 100
-            }
-          }, 
-          id: "${calculatedOrderId}", 
-          lineItemId: "${lineItemId}"
+          discount: $discount,
+          id: $id,
+          lineItemId: $lineItemId
         ) {
           calculatedLineItem {
             id
@@ -314,7 +334,17 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: addDiscountMutation
+        query: addDiscountMutation,
+        variables: {
+          id: calculatedOrderId,
+          lineItemId: lineItemId,
+          discount: {
+            description: "Free promotional item",
+            value: {
+              percentage: 100
+            }
+          }
+        }
       })
     });
 
@@ -336,11 +366,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     // Step 5: Commit the changes to the order
     console.log('Committing order edit changes');
     const commitMutation = `
-      mutation {
+      mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean!, $staffNote: String) {
         orderEditCommit(
-          id: "${calculatedOrderId}", 
-          notifyCustomer: false, 
-          staffNote: "Added free promotional item"
+          id: $id,
+          notifyCustomer: $notifyCustomer,
+          staffNote: $staffNote
         ) {
           order {
             id
@@ -360,7 +390,12 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: commitMutation
+        query: commitMutation,
+        variables: {
+          id: calculatedOrderId,
+          notifyCustomer: false,
+          staffNote: "Added free promotional item"
+        }
       })
     });
 
@@ -419,18 +454,8 @@ export async function POST(request: NextRequest) {
     if (hasTriggerProduct(order) && !hasOGPack(order)) {
       console.log('Trigger condition met, adding free item to order');
       
-      // Extract order ID - use admin_graphql_api_id if available, otherwise numeric id
-      const orderId = order.order_number || order.admin_graphql_api_id;
-      
-      if (!orderId) {
-        console.error('Could not determine order ID from webhook payload');
-        return NextResponse.json({ error: 'Missing order ID' }, { status: 400 });
-      }
-
-      console.log(`Adding free item to order ID: ${orderId}`);
-      
-      // Add the free item directly to the order
-      const result = await addFreeItemToOrder(orderId);
+      // Add the free item directly to the order - passing the whole order object
+      const result = await addFreeItemToOrder(order);
       
       if (!result || result.errors) {
         console.error('Error adding free item to order:', result?.errors || 'Unknown error');
