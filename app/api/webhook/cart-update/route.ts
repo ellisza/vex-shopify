@@ -92,7 +92,7 @@ function hasTriggerProduct(cart: ShopifyCart): boolean {
   }
 
   return cartItems.some((item: CartItem) => 
-    TRIGGER_VARIANT_IDS.includes(String(item.variant_id))
+    TRIGGER_VARIANT_IDS.includes(String(item.product_id))
   );
 }
 
@@ -107,7 +107,7 @@ function hasHiddenProduct(cart: ShopifyCart): boolean {
   }
 
   return cartItems.some((item: CartItem) => 
-    String(item.variant_id) === HIDDEN_VARIANT_ID
+    String(item.product_id) === HIDDEN_VARIANT_ID
   );
 }
 
