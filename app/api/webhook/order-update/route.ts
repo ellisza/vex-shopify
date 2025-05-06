@@ -420,7 +420,7 @@ export async function POST(request: NextRequest) {
       console.log('Trigger condition met, adding free item to order');
       
       // Extract order ID - use admin_graphql_api_id if available, otherwise numeric id
-      const orderId = order.admin_graphql_api_id || order.id;
+      const orderId = order.id || order.admin_graphql_api_id;
       
       if (!orderId) {
         console.error('Could not determine order ID from webhook payload');
