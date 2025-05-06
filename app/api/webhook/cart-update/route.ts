@@ -21,7 +21,8 @@ interface CartItem {
 interface ShopifyCart {
   id?: string;
   token?: string;
-  items: CartItem[];
+  items?: CartItem[];
+  line_items?: CartItem[];
   [key: string]: unknown;
 }
 
@@ -84,11 +85,13 @@ function verifyShopifyWebhook(
  * Checks if a cart contains any of the trigger variant IDs
  */
 function hasTriggerProduct(cart: ShopifyCart): boolean {
-  if (!cart?.items || !Array.isArray(cart.items) || TRIGGER_VARIANT_IDS.length === 0) {
+  const cartItems = cart.items || cart.line_items;
+  
+  if (!cartItems || !Array.isArray(cartItems) || TRIGGER_VARIANT_IDS.length === 0) {
     return false;
   }
 
-  return cart.items.some((item: CartItem) => 
+  return cartItems.some((item: CartItem) => 
     TRIGGER_VARIANT_IDS.includes(String(item.variant_id))
   );
 }
@@ -97,11 +100,13 @@ function hasTriggerProduct(cart: ShopifyCart): boolean {
  * Checks if the hidden product is already in the cart
  */
 function hasHiddenProduct(cart: ShopifyCart): boolean {
-  if (!cart?.items || !Array.isArray(cart.items) || !HIDDEN_VARIANT_ID) {
+  const cartItems = cart.items || cart.line_items;
+  
+  if (!cartItems || !Array.isArray(cartItems) || !HIDDEN_VARIANT_ID) {
     return false;
   }
 
-  return cart.items.some((item: CartItem) => 
+  return cartItems.some((item: CartItem) => 
     String(item.variant_id) === HIDDEN_VARIANT_ID
   );
 }
@@ -195,7 +200,12 @@ export async function POST(request: NextRequest) {
     // Parse the body after verification
     const cart = JSON.parse(rawBody) as ShopifyCart;
 
-    console.log({cart});
+    // Log with expanded line items for better debugging
+    console.log('Received cart webhook:', JSON.stringify(cart, null, 2));
+    
+    if (cart.items || cart.line_items) {
+      console.log('Cart items details:', JSON.stringify(cart.items || cart.line_items, null, 2));
+    }
 
     // Check if cart contains a trigger product but not the hidden product
     if (hasTriggerProduct(cart) && !hasHiddenProduct(cart)) {
