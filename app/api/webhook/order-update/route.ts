@@ -174,8 +174,8 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     // Step 1: Begin an order edit session - this is the first required step for editing an order
     console.log('Starting order edit session');
     const beginEditMutation = `
-      mutation orderEditBegin($id: ID!) {
-        orderEditBegin(id: $id) {
+      mutation {
+        orderEditBegin(id: "${orderGid}") {
           calculatedOrder {
             id
           }
@@ -194,8 +194,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: beginEditMutation,
-        variables: { id: orderGid }
+        query: beginEditMutation
       })
     });
 
@@ -231,11 +230,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     console.log(`Adding variant with GID: ${variantGid}`);
 
     const addVariantMutation = `
-      mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+      mutation {
         orderEditAddVariant(
-          id: $id,
-          variantId: $variantId,
-          quantity: $quantity
+          id: "${calculatedOrderId}", 
+          variantId: "${variantGid}", 
+          quantity: 1
         ) {
           calculatedLineItem {
             id
@@ -255,12 +254,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: addVariantMutation,
-        variables: { 
-          id: calculatedOrderId,
-          variantId: variantGid,
-          quantity: 1
-        }
+        query: addVariantMutation
       })
     });
 
@@ -291,11 +285,16 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     // Step 4: Add a 100% discount to make the item free
     console.log('Adding 100% discount to make item free');
     const addDiscountMutation = `
-      mutation orderEditAddLineItemDiscount($discount: OrderEditAppliedDiscountInput!, $id: ID!, $lineItemId: ID!) {
+      mutation {
         orderEditAddLineItemDiscount(
-          discount: $discount,
-          id: $id,
-          lineItemId: $lineItemId
+          discount: {
+            description: "Free promotional item", 
+            value: {
+              percentage: 100
+            }
+          }, 
+          id: "${calculatedOrderId}", 
+          lineItemId: "${lineItemId}"
         ) {
           calculatedLineItem {
             id
@@ -315,17 +314,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: addDiscountMutation,
-        variables: { 
-          id: calculatedOrderId,
-          lineItemId: lineItemId,
-          discount: {
-            description: "Free promotional item",
-            value: {
-              percentage: 100
-            }
-          }
-        }
+        query: addDiscountMutation
       })
     });
 
@@ -347,11 +336,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     // Step 5: Commit the changes to the order
     console.log('Committing order edit changes');
     const commitMutation = `
-      mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean!, $staffNote: String) {
+      mutation {
         orderEditCommit(
-          id: $id,
-          notifyCustomer: $notifyCustomer,
-          staffNote: $staffNote
+          id: "${calculatedOrderId}", 
+          notifyCustomer: false, 
+          staffNote: "Added free promotional item"
         ) {
           order {
             id
@@ -371,12 +360,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: commitMutation,
-        variables: { 
-          id: calculatedOrderId,
-          notifyCustomer: false,
-          staffNote: "Added free promotional item"
-        }
+        query: commitMutation
       })
     });
 
