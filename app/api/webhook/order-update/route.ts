@@ -22,8 +22,9 @@ interface LineItem {
 }
 
 interface ShopifyOrder {
-  id: string;
-  order_number: string;
+  id: string | number;
+  admin_graphql_api_id?: string;
+  order_number: string | number;
   line_items: LineItem[];
   [key: string]: unknown;
 }
@@ -103,9 +104,17 @@ function hasTriggerProduct(order: ShopifyOrder): boolean {
     return false;
   }
 
-  return order.line_items.some((item: LineItem) => 
-    TRIGGER_VARIANT_IDS.includes(String(item.product_id))
-  );
+  console.log('Checking for trigger products. Configured trigger IDs:', TRIGGER_VARIANT_IDS);
+  
+  for (const item of order.line_items) {
+    console.log(`Line item product_id: ${item.product_id}, checking if in trigger list`);
+    if (item.product_id && TRIGGER_VARIANT_IDS.includes(String(item.product_id))) {
+      console.log(`Found matching trigger product: ${item.product_id}`);
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 /**
@@ -116,21 +125,37 @@ function hasOGPack(order: ShopifyOrder): boolean {
     return false;
   }
 
-  return order.line_items.some((item: LineItem) => 
-    String(item.product_id) === OG_VARIANT_ID
-  );
+  console.log(`Checking if order already has OG Pack (ID: ${OG_VARIANT_ID})`);
+  
+  for (const item of order.line_items) {
+    // Check both product_id and variant_id since either could match
+    if ((item.product_id && String(item.product_id) === OG_VARIANT_ID) || 
+        (item.variant_id && String(item.variant_id) === OG_VARIANT_ID)) {
+      console.log(`Order already has OG Pack`);
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 /**
  * Adds the free item directly to the order using Admin API
  */
-async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | null> {
+async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiResponse | null> {
   if (!SHOPIFY_ADMIN_API_KEY || !OG_VARIANT_ID) {
     console.error('Missing required environment variables for API call');
     return null;
   }
 
   const graphqlEndpoint = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-04/graphql.json`;
+  
+  // Convert numeric order ID to required Shopify GraphQL ID format
+  const orderGid = typeof orderId === 'number' || /^\d+$/.test(String(orderId))
+    ? `gid://shopify/Order/${orderId}`
+    : orderId;
+    
+  console.log(`Using order GID: ${orderGid}`);
   
   try {
     // Step 1: Begin an order edit
@@ -153,6 +178,7 @@ async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | n
       }
     `;
 
+    console.log('Starting order edit session');
     const beginEditResponse = await fetch(graphqlEndpoint, {
       method: 'POST',
       headers: {
@@ -161,24 +187,41 @@ async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | n
       },
       body: JSON.stringify({
         query: beginEditMutation,
-        variables: { id: orderId }
+        variables: { id: orderGid }
       })
     });
 
     if (!beginEditResponse.ok) {
-      throw new Error(`HTTP error! status: ${beginEditResponse.status}`);
+      const statusText = await beginEditResponse.text();
+      console.error(`HTTP error when beginning edit: ${beginEditResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${beginEditResponse.status}, details: ${statusText}`);
     }
 
     const beginEditResult = await beginEditResponse.json();
-    console.log('Begin edit result:', JSON.stringify(beginEditResult, null, 2));
+    console.log('Begin edit response:', JSON.stringify(beginEditResult, null, 2));
 
     if (beginEditResult.errors || (beginEditResult.data?.orderEdit?.userErrors && beginEditResult.data.orderEdit.userErrors.length > 0)) {
-      throw new Error('Error beginning order edit: ' + JSON.stringify(beginEditResult.errors || beginEditResult.data?.orderEdit?.userErrors));
+      const errors = beginEditResult.errors || beginEditResult.data?.orderEdit?.userErrors;
+      console.error('Error beginning order edit:', JSON.stringify(errors));
+      throw new Error('Error beginning order edit: ' + JSON.stringify(errors));
+    }
+
+    if (!beginEditResult.data?.orderEdit?.id) {
+      console.error('No orderEdit ID returned:', JSON.stringify(beginEditResult));
+      throw new Error('No orderEdit ID returned from beginEdit mutation');
     }
 
     const orderEditId = beginEditResult.data.orderEdit.id;
+    console.log(`Order edit session created with ID: ${orderEditId}`);
 
     // Step 2: Add the variant to the order
+    // Ensure variant ID is in the correct format
+    const variantGid = /^gid:\/\/shopify\/ProductVariant\//.test(OG_VARIANT_ID)
+      ? OG_VARIANT_ID
+      : `gid://shopify/ProductVariant/${OG_VARIANT_ID}`;
+      
+    console.log(`Adding variant with GID: ${variantGid}`);
+
     const addVariantMutation = `
       mutation addVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
         orderEditAddVariant(
@@ -208,25 +251,35 @@ async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | n
         query: addVariantMutation,
         variables: { 
           id: orderEditId,
-          variantId: `gid://shopify/ProductVariant/${OG_VARIANT_ID}`,
+          variantId: variantGid,
           quantity: 1
         }
       })
     });
 
     if (!addVariantResponse.ok) {
-      throw new Error(`HTTP error! status: ${addVariantResponse.status}`);
+      const statusText = await addVariantResponse.text();
+      console.error(`HTTP error when adding variant: ${addVariantResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${addVariantResponse.status}, details: ${statusText}`);
     }
 
     const addVariantResult = await addVariantResponse.json();
-    console.log('Add variant result:', JSON.stringify(addVariantResult, null, 2));
+    console.log('Add variant response:', JSON.stringify(addVariantResult, null, 2));
 
     if (addVariantResult.errors || (addVariantResult.data?.orderEditAddVariant?.userErrors && addVariantResult.data.orderEditAddVariant.userErrors.length > 0)) {
-      throw new Error('Error adding variant to order: ' + JSON.stringify(addVariantResult.errors || addVariantResult.data?.orderEditAddVariant?.userErrors));
+      const errors = addVariantResult.errors || addVariantResult.data?.orderEditAddVariant?.userErrors;
+      console.error('Error adding variant to order:', JSON.stringify(errors));
+      throw new Error('Error adding variant to order: ' + JSON.stringify(errors));
+    }
+
+    if (!addVariantResult.data?.orderEditAddVariant?.calculatedLineItem?.id) {
+      console.error('No calculatedLineItem ID returned:', JSON.stringify(addVariantResult));
+      throw new Error('No calculatedLineItem ID returned from orderEditAddVariant mutation');
     }
 
     // Step 3: Set the new line item price to $0 (free)
     const lineItemId = addVariantResult.data.orderEditAddVariant.calculatedLineItem.id;
+    console.log(`Setting price to $0 for line item: ${lineItemId}`);
     
     const updateLineItemMutation = `
       mutation updateLineItem($id: ID!, $lineItemId: ID!, $price: MoneyInput!) {
@@ -280,13 +333,21 @@ async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | n
     });
 
     if (!updateLineItemResponse.ok) {
-      throw new Error(`HTTP error! status: ${updateLineItemResponse.status}`);
+      const statusText = await updateLineItemResponse.text();
+      console.error(`HTTP error when updating line item: ${updateLineItemResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${updateLineItemResponse.status}, details: ${statusText}`);
     }
 
     const updateLineItemResult = await updateLineItemResponse.json();
-    console.log('Update line item result:', JSON.stringify(updateLineItemResult, null, 2));
+    console.log('Update line item response:', JSON.stringify(updateLineItemResult, null, 2));
+
+    if (updateLineItemResult.errors) {
+      console.error('Error updating line item:', JSON.stringify(updateLineItemResult.errors));
+      throw new Error('Error updating line item: ' + JSON.stringify(updateLineItemResult.errors));
+    }
 
     // Step 4: Commit the order edit
+    console.log('Committing order edit');
     const commitMutation = `
       mutation commitEdit($id: ID!) {
         orderEditCommit(
@@ -318,16 +379,21 @@ async function addFreeItemToOrder(orderId: string): Promise<AdminApiResponse | n
     });
 
     if (!commitResponse.ok) {
-      throw new Error(`HTTP error! status: ${commitResponse.status}`);
+      const statusText = await commitResponse.text();
+      console.error(`HTTP error when committing edit: ${commitResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${commitResponse.status}, details: ${statusText}`);
     }
 
     const commitResult = await commitResponse.json();
-    console.log('Commit result:', JSON.stringify(commitResult, null, 2));
+    console.log('Commit response:', JSON.stringify(commitResult, null, 2));
 
     if (commitResult.errors || (commitResult.data?.orderEditCommit?.userErrors && commitResult.data.orderEditCommit.userErrors.length > 0)) {
-      throw new Error('Error committing order edit: ' + JSON.stringify(commitResult.errors || commitResult.data?.orderEditCommit?.userErrors));
+      const errors = commitResult.errors || commitResult.data?.orderEditCommit?.userErrors;
+      console.error('Error committing order edit:', JSON.stringify(errors));
+      throw new Error('Error committing order edit: ' + JSON.stringify(errors));
     }
 
+    console.log('Successfully added free item to order');
     return commitResult;
   } catch (error) {
     console.error('Error updating order:', error);
@@ -353,24 +419,30 @@ export async function POST(request: NextRequest) {
     const order = JSON.parse(rawBody) as ShopifyOrder;
 
     // Log order details for debugging
-    console.log('Received order webhook:', JSON.stringify(order, null, 2));
+    console.log('Received order webhook for order #', order.order_number);
+    console.log('Admin GraphQL API ID:', order.admin_graphql_api_id);
     
     if (order.line_items) {
-      console.log('Order line items details:', JSON.stringify(order.line_items, null, 2));
+      console.log(`Order contains ${order.line_items.length} line items`);
+      order.line_items.forEach((item, index) => {
+        console.log(`Item ${index + 1}: product_id=${item.product_id}, variant_id=${item.variant_id}, quantity=${item.quantity}`);
+      });
     }
 
     // Check if order contains a trigger product and doesn't already have the OG Pack
     if (hasTriggerProduct(order) && !hasOGPack(order)) {
       console.log('Trigger condition met, adding free item to order');
       
-      // Extract order ID in the format Shopify expects
-      const orderId = order.id;
+      // Extract order ID - use admin_graphql_api_id if available, otherwise numeric id
+      const orderId = order.admin_graphql_api_id || order.id;
       
       if (!orderId) {
         console.error('Could not determine order ID from webhook payload');
         return NextResponse.json({ error: 'Missing order ID' }, { status: 400 });
       }
 
+      console.log(`Adding free item to order ID: ${orderId}`);
+      
       // Add the free item directly to the order
       const result = await addFreeItemToOrder(orderId);
       
@@ -386,6 +458,10 @@ export async function POST(request: NextRequest) {
         { success: true, message: 'Free item added to order' },
         { status: 200 }
       );
+    } else {
+      console.log('Trigger conditions not met:');
+      console.log('- Has trigger product:', hasTriggerProduct(order));
+      console.log('- Already has OG pack:', hasOGPack(order));
     }
 
     // If conditions not met, just acknowledge receipt
