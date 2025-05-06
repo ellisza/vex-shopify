@@ -31,21 +31,34 @@ interface ShopifyOrder {
 
 interface AdminApiResponse {
   data?: {
-    orderEdit?: {
-      calculatedLineItems?: {
-        edges: Array<{
-          node: {
-            id: string;
-          };
-        }>;
+    orderEditBegin?: {
+      calculatedOrder: {
+        id: string;
       };
-      id: string;
       userErrors: Array<{
         field: string | null;
         message: string;
       }>;
     };
     orderEditAddVariant?: {
+      calculatedLineItem: {
+        id: string;
+      };
+      userErrors: Array<{
+        field: string | null;
+        message: string;
+      }>;
+    };
+    orderEditSetQuantity?: {
+      calculatedLineItem: {
+        id: string;
+      };
+      userErrors: Array<{
+        field: string | null;
+        message: string;
+      }>;
+    };
+    orderEditAddLineItemDiscount?: {
       calculatedLineItem: {
         id: string;
       };
@@ -140,7 +153,7 @@ function hasOGPack(order: ShopifyOrder): boolean {
 }
 
 /**
- * Adds the free item directly to the order using Admin API
+ * Adds the free item directly to the order using Admin API and Order Edit operations
  */
 async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiResponse | null> {
   if (!SHOPIFY_ADMIN_API_KEY || !OG_VARIANT_ID) {
@@ -158,17 +171,13 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
   console.log(`Using order GID: ${orderGid}`);
   
   try {
-    // Step 1: Begin an order edit
+    // Step 1: Begin an order edit session - this is the first required step for editing an order
+    console.log('Starting order edit session');
     const beginEditMutation = `
-      mutation beginEdit($id: ID!) {
-        orderEdit(id: $id) {
-          id
-          calculatedLineItems(first: 5) {
-            edges {
-              node {
-                id
-              }
-            }
+      mutation orderEditBegin($id: ID!) {
+        orderEditBegin(id: $id) {
+          calculatedOrder {
+            id
           }
           userErrors {
             field
@@ -178,7 +187,6 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
       }
     `;
 
-    console.log('Starting order edit session');
     const beginEditResponse = await fetch(graphqlEndpoint, {
       method: 'POST',
       headers: {
@@ -200,19 +208,19 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     const beginEditResult = await beginEditResponse.json();
     console.log('Begin edit response:', JSON.stringify(beginEditResult, null, 2));
 
-    if (beginEditResult.errors || (beginEditResult.data?.orderEdit?.userErrors && beginEditResult.data.orderEdit.userErrors.length > 0)) {
-      const errors = beginEditResult.errors || beginEditResult.data?.orderEdit?.userErrors;
+    if (beginEditResult.errors || (beginEditResult.data?.orderEditBegin?.userErrors && beginEditResult.data.orderEditBegin.userErrors.length > 0)) {
+      const errors = beginEditResult.errors || beginEditResult.data?.orderEditBegin?.userErrors;
       console.error('Error beginning order edit:', JSON.stringify(errors));
       throw new Error('Error beginning order edit: ' + JSON.stringify(errors));
     }
 
-    if (!beginEditResult.data?.orderEdit?.id) {
-      console.error('No orderEdit ID returned:', JSON.stringify(beginEditResult));
-      throw new Error('No orderEdit ID returned from beginEdit mutation');
+    if (!beginEditResult.data?.orderEditBegin?.calculatedOrder?.id) {
+      console.error('No calculatedOrder ID returned:', JSON.stringify(beginEditResult));
+      throw new Error('No calculatedOrder ID returned from orderEditBegin mutation');
     }
 
-    const orderEditId = beginEditResult.data.orderEdit.id;
-    console.log(`Order edit session created with ID: ${orderEditId}`);
+    const calculatedOrderId = beginEditResult.data.orderEditBegin.calculatedOrder.id;
+    console.log(`Order edit session created with calculatedOrder ID: ${calculatedOrderId}`);
 
     // Step 2: Add the variant to the order
     // Ensure variant ID is in the correct format
@@ -223,12 +231,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     console.log(`Adding variant with GID: ${variantGid}`);
 
     const addVariantMutation = `
-      mutation addVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+      mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
         orderEditAddVariant(
           id: $id,
           variantId: $variantId,
-          quantity: $quantity,
-          allowDuplicates: false
+          quantity: $quantity
         ) {
           calculatedLineItem {
             id
@@ -250,7 +257,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
       body: JSON.stringify({
         query: addVariantMutation,
         variables: { 
-          id: orderEditId,
+          id: calculatedOrderId,
           variantId: variantGid,
           quantity: 1
         }
@@ -277,30 +284,18 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
       throw new Error('No calculatedLineItem ID returned from orderEditAddVariant mutation');
     }
 
-    // Step 3: Set the new line item price to $0 (free)
+    // Step 3: Get the line item ID for the newly added variant
     const lineItemId = addVariantResult.data.orderEditAddVariant.calculatedLineItem.id;
-    console.log(`Setting price to $0 for line item: ${lineItemId}`);
-    
-    const updateLineItemMutation = `
-      mutation updateLineItem($id: ID!, $lineItemId: ID!, $price: MoneyInput!) {
-        orderEditSetQuantity(
+    console.log(`Added line item ID: ${lineItemId}`);
+
+    // Step 4: Add a 100% discount to make the item free
+    console.log('Adding 100% discount to make item free');
+    const addDiscountMutation = `
+      mutation orderEditAddLineItemDiscount($discount: OrderEditAppliedDiscountInput!, $id: ID!, $lineItemId: ID!) {
+        orderEditAddLineItemDiscount(
+          discount: $discount,
           id: $id,
-          lineItemId: $lineItemId,
-          quantity: 1,
-          recomputeTaxes: true
-        ) {
-          calculatedLineItem {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-        orderEditUpdateLineItem(
-          id: $id,
-          lineItemId: $lineItemId,
-          price: $price
+          lineItemId: $lineItemId
         ) {
           calculatedLineItem {
             id
@@ -313,47 +308,50 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
       }
     `;
 
-    const updateLineItemResponse = await fetch(graphqlEndpoint, {
+    const addDiscountResponse = await fetch(graphqlEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
       },
       body: JSON.stringify({
-        query: updateLineItemMutation,
+        query: addDiscountMutation,
         variables: { 
-          id: orderEditId,
+          id: calculatedOrderId,
           lineItemId: lineItemId,
-          price: {
-            amount: "0.00",
-            currencyCode: "USD" // Use appropriate currency for your store
+          discount: {
+            description: "Free promotional item",
+            value: {
+              percentage: 100
+            }
           }
         }
       })
     });
 
-    if (!updateLineItemResponse.ok) {
-      const statusText = await updateLineItemResponse.text();
-      console.error(`HTTP error when updating line item: ${updateLineItemResponse.status}, ${statusText}`);
-      throw new Error(`HTTP error! status: ${updateLineItemResponse.status}, details: ${statusText}`);
+    if (!addDiscountResponse.ok) {
+      const statusText = await addDiscountResponse.text();
+      console.error(`HTTP error when adding discount: ${addDiscountResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${addDiscountResponse.status}, details: ${statusText}`);
     }
 
-    const updateLineItemResult = await updateLineItemResponse.json();
-    console.log('Update line item response:', JSON.stringify(updateLineItemResult, null, 2));
+    const addDiscountResult = await addDiscountResponse.json();
+    console.log('Add discount response:', JSON.stringify(addDiscountResult, null, 2));
 
-    if (updateLineItemResult.errors) {
-      console.error('Error updating line item:', JSON.stringify(updateLineItemResult.errors));
-      throw new Error('Error updating line item: ' + JSON.stringify(updateLineItemResult.errors));
+    if (addDiscountResult.errors || (addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors && addDiscountResult.data.orderEditAddLineItemDiscount.userErrors.length > 0)) {
+      const errors = addDiscountResult.errors || addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors;
+      console.error('Error adding discount to line item:', JSON.stringify(errors));
+      throw new Error('Error adding discount to line item: ' + JSON.stringify(errors));
     }
 
-    // Step 4: Commit the order edit
-    console.log('Committing order edit');
+    // Step 5: Commit the changes to the order
+    console.log('Committing order edit changes');
     const commitMutation = `
-      mutation commitEdit($id: ID!) {
+      mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean!, $staffNote: String) {
         orderEditCommit(
           id: $id,
-          notifyCustomer: false, 
-          staffNote: "Added free item as part of promotion"
+          notifyCustomer: $notifyCustomer,
+          staffNote: $staffNote
         ) {
           order {
             id
@@ -374,7 +372,11 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
       },
       body: JSON.stringify({
         query: commitMutation,
-        variables: { id: orderEditId }
+        variables: { 
+          id: calculatedOrderId,
+          notifyCustomer: false,
+          staffNote: "Added free promotional item"
+        }
       })
     });
 
@@ -396,7 +398,7 @@ async function addFreeItemToOrder(orderId: string | number): Promise<AdminApiRes
     console.log('Successfully added free item to order');
     return commitResult;
   } catch (error) {
-    console.error('Error updating order:', error);
+    console.error('Error adding free item to order:', error);
     return null;
   }
 }
