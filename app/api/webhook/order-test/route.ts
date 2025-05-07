@@ -1,17 +1,13 @@
-import { NextRequest, NextResponse } from 'next/server';
-import crypto from 'crypto';
+import { NextResponse } from 'next/server';
 
 // This is a webhook handler for the "checkout/completed" or "orders/create" events
 // It detects when a qualifying purchase is made and adds a free item directly to the order
 // for fulfillment rather than just flagging it
 
 // This will eventually be populated from environment variables
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || '';
-const TRIGGER_VARIANT_IDS = (process.env.TRIGGER_VARIANT_IDS || '').split(',');
 const OG_VARIANT_ID = process.env.OG_VARIANT_ID || '';
 const SHOPIFY_ADMIN_API_KEY = process.env.SHOPIFY_ADMIN_API_KEY || '';
 const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN || '';
-const BYPASS_WEBHOOK_VERIFICATION = process.env.BYPASS_WEBHOOK_VERIFICATION === 'true';
 
 // TypeScript interfaces for Shopify checkout data
 interface LineItem {
@@ -81,75 +77,6 @@ interface AdminApiResponse {
     message: string;
     [key: string]: unknown;
   }>;
-}
-
-/**
- * Verifies that the webhook request is genuinely from Shopify
- */
-function verifyShopifyWebhook(
-  body: string,
-  hmacHeader: string | null
-): boolean {
-  // If in development mode and bypass is enabled, skip verification
-  if (BYPASS_WEBHOOK_VERIFICATION) {
-    console.warn('⚠️ Webhook verification bypassed - NEVER use this in production!');
-    return true;
-  }
-
-  if (!SHOPIFY_WEBHOOK_SECRET || !hmacHeader) return false;
-
-  const generatedHash = crypto
-    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-    .update(body)
-    .digest('base64');
-
-  return crypto.timingSafeEqual(
-    Buffer.from(generatedHash),
-    Buffer.from(hmacHeader)
-  );
-}
-
-/**
- * Checks if an order contains any of the trigger variant IDs
- */
-function hasTriggerProduct(order: ShopifyOrder): boolean {
-  if (!order.line_items || !Array.isArray(order.line_items) || TRIGGER_VARIANT_IDS.length === 0) {
-    return false;
-  }
-
-  console.log('Checking for trigger products. Configured trigger IDs:', TRIGGER_VARIANT_IDS);
-  
-  for (const item of order.line_items) {
-    console.log(`Line item product_id: ${item.product_id}, checking if in trigger list`);
-    if (item.product_id && TRIGGER_VARIANT_IDS.includes(String(item.product_id))) {
-      console.log(`Found matching trigger product: ${item.product_id}`);
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-/**
- * Checks if an order already contains the OG Pack
- */
-function hasOGPack(order: ShopifyOrder): boolean {
-  if (!order.line_items || !Array.isArray(order.line_items) || !OG_VARIANT_ID) {
-    return false;
-  }
-
-  console.log(`Checking if order already has OG Pack (ID: ${OG_VARIANT_ID})`);
-  
-  for (const item of order.line_items) {
-    // Check both product_id and variant_id since either could match
-    if ((item.product_id && String(item.product_id) === OG_VARIANT_ID) || 
-        (item.variant_id && String(item.variant_id) === OG_VARIANT_ID)) {
-      console.log(`Order already has OG Pack`);
-      return true;
-    }
-  }
-  
-  return false;
 }
 
 /**
@@ -250,8 +177,9 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
     console.log(`Adding variant with GID: ${variantGid}`);
 
     const addVariantMutation = `
-      mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+      mutation orderEditAddVariant($allowDuplicates: Boolean, $id: ID!, $quantity: Int!, $variantId: ID!) {
         orderEditAddVariant(
+          allowDuplicates: $allowDuplicates,
           id: $id,
           variantId: $variantId,
           quantity: $quantity
@@ -276,6 +204,7 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
       body: JSON.stringify({
         query: addVariantMutation,
         variables: {
+          allowDuplicate: false,
           id: calculatedOrderId,
           variantId: variantGid,
           quantity: 1
@@ -303,67 +232,7 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
       throw new Error('No calculatedLineItem ID returned from orderEditAddVariant mutation');
     }
 
-    // Step 3: Get the line item ID for the newly added variant
-    const lineItemId = addVariantResult.data.orderEditAddVariant.calculatedLineItem.id;
-    console.log(`Added line item ID: ${lineItemId}`);
-
-    // Step 4: Add a 100% discount to make the item free
-    console.log('Adding 100% discount to make item free');
-    const addDiscountMutation = `
-      mutation orderEditAddLineItemDiscount($discount: OrderEditAppliedDiscountInput!, $id: ID!, $lineItemId: ID!) {
-        orderEditAddLineItemDiscount(
-          discount: $discount,
-          id: $id,
-          lineItemId: $lineItemId
-        ) {
-          calculatedLineItem {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const addDiscountResponse = await fetch(graphqlEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
-      },
-      body: JSON.stringify({
-        query: addDiscountMutation,
-        variables: {
-          id: calculatedOrderId,
-          lineItemId: lineItemId,
-          discount: {
-            description: "Free promotional item",
-            value: {
-              percentage: 100
-            }
-          }
-        }
-      })
-    });
-
-    if (!addDiscountResponse.ok) {
-      const statusText = await addDiscountResponse.text();
-      console.error(`HTTP error when adding discount: ${addDiscountResponse.status}, ${statusText}`);
-      throw new Error(`HTTP error! status: ${addDiscountResponse.status}, details: ${statusText}`);
-    }
-
-    const addDiscountResult = await addDiscountResponse.json();
-    console.log('Add discount response:', JSON.stringify(addDiscountResult, null, 2));
-
-    if (addDiscountResult.errors || (addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors && addDiscountResult.data.orderEditAddLineItemDiscount.userErrors.length > 0)) {
-      const errors = addDiscountResult.errors || addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors;
-      console.error('Error adding discount to line item:', JSON.stringify(errors));
-      throw new Error('Error adding discount to line item: ' + JSON.stringify(errors));
-    }
-
-    // Step 5: Commit the changes to the order
+    // Step 3: Commit the changes to the order
     console.log('Committing order edit changes');
     const commitMutation = `
       mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean!, $staffNote: String) {
@@ -422,68 +291,86 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
   }
 }
 
-export async function POST(request: NextRequest) {
+export async function GET() {
   try {
-    // Get the request body as text to verify the HMAC
-    const rawBody = await request.text();
-    
-    // Verify webhook signature
-    const hmacHeader = request.headers.get('x-shopify-hmac-sha256');
-    const isVerified = verifyShopifyWebhook(rawBody, hmacHeader);
-    
-    if (!isVerified) {
-      console.error('Invalid webhook signature');
-      return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
-    }
+    // Hardcoded order data for testing
+    const testOrder: ShopifyOrder = {
+      id: 5341903487184,
+      admin_graphql_api_id: 'gid://shopify/Order/5341903487184',
+      order_number: 241114,
+      line_items: []  // Not actually using this for our test
+    };
 
-    // Parse the body after verification
-    const order = JSON.parse(rawBody) as ShopifyOrder;
-
-    // Log order details for debugging
-    console.log('Received order webhook for order #', order.order_number);
-    console.log('Admin GraphQL API ID:', order.admin_graphql_api_id);
+    console.log('Test endpoint called with hardcoded order #', testOrder.order_number);
+    console.log('Admin GraphQL API ID:', testOrder.admin_graphql_api_id);
     
-    if (order.line_items) {
-      console.log(`Order contains ${order.line_items.length} line items`);
-      order.line_items.forEach((item, index) => {
-        console.log(`Item ${index + 1}: product_id=${item.product_id}, variant_id=${item.variant_id}, quantity=${item.quantity}`);
-      });
-    }
-
-    // Check if order contains a trigger product and doesn't already have the OG Pack
-    if (hasTriggerProduct(order) && !hasOGPack(order)) {
-      console.log('Trigger condition met, adding free item to order');
-      
-      // Add the free item directly to the order - passing the whole order object
-      const result = await addFreeItemToOrder(order);
-      
-      if (!result || result.errors) {
-        console.error('Error adding free item to order:', result?.errors || 'Unknown error');
-        return NextResponse.json(
-          { error: 'Failed to add free item to order', details: result?.errors || 'Unknown error' },
-          { status: 500 }
-        );
+    // First, fetch order details to verify it exists and check its status
+    const graphqlEndpoint = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-04/graphql.json`;
+    console.log('Fetching order details...');
+    
+    const getOrderQuery = `
+      query GetOrderDetails {
+        order(id: "gid://shopify/Order/5341903487184") {
+            id
+            name
+            createdAt
+            currencyCode
+        }
       }
-
+    `;
+    
+    const orderResponse = await fetch(graphqlEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
+      },
+      body: JSON.stringify({
+        query: getOrderQuery
+      })
+    });
+    
+    if (!orderResponse.ok) {
+      const statusText = await orderResponse.text();
+      console.error(`HTTP error when fetching order: ${orderResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${orderResponse.status}, details: ${statusText}`);
+    }
+    
+    const orderResult = await orderResponse.json();
+    console.log('Order details:', JSON.stringify(orderResult, null, 2));
+    
+    if (orderResult.errors) {
+      console.error('Error fetching order:', orderResult.errors);
       return NextResponse.json(
-        { 
-          success: true, 
-          message: 'Free item added to order'
-        },
-        { status: 200 }
+        { error: 'Failed to fetch order', details: orderResult.errors },
+        { status: 500 }
       );
-    } else {
-      console.log('Trigger conditions not met:');
-      console.log('- Has trigger product:', hasTriggerProduct(order));
-      console.log('- Already has OG pack:', hasOGPack(order));
+    }
+    
+    // Directly attempt to add the free item to the order
+    console.log('Attempting to edit order...');
+    const result = await addFreeItemToOrder(testOrder);
+    
+    if (!result || result.errors) {
+      console.error('Error adding free item to order:', result?.errors || 'Unknown error');
+      return NextResponse.json(
+        { error: 'Failed to add free item to order', details: result?.errors || 'Unknown error' },
+        { status: 500 }
+      );
     }
 
-    // If conditions not met, just acknowledge receipt
-    return NextResponse.json({ success: true, message: 'Webhook received' }, { status: 200 });
-  } catch (error) {
-    console.error('Error processing webhook:', error);
     return NextResponse.json(
-      { error: 'Error processing webhook', details: String(error) },
+      { 
+        success: true, 
+        message: 'Free item added to order',
+        result 
+      },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error('Error processing request:', error);
+    return NextResponse.json(
+      { error: 'Error processing request', details: String(error) },
       { status: 500 }
     );
   }
