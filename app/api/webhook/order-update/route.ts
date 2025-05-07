@@ -250,9 +250,8 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
     console.log(`Adding variant with GID: ${variantGid}`);
 
     const addVariantMutation = `
-      mutation orderEditAddVariant($allowDuplicates: Boolean, $id: ID!, $quantity: Int!, $variantId: ID!) {
+      mutation orderEditAddVariant($id: ID!, $quantity: Int!, $variantId: ID!) {
         orderEditAddVariant(
-          allowDuplicates: $allowDuplicates,
           id: $id,
           variantId: $variantId,
           quantity: $quantity
@@ -277,7 +276,6 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
       body: JSON.stringify({
         query: addVariantMutation,
         variables: {
-          allowDuplicate: false,
           id: calculatedOrderId,
           variantId: `gid://shopify/ProductVariant/44537880871120`,
           quantity: 1
