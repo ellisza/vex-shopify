@@ -295,9 +295,9 @@ export async function GET() {
   try {
     // Hardcoded order data for testing
     const testOrder: ShopifyOrder = {
-      id: 5341903487184,
-      admin_graphql_api_id: 'gid://shopify/Order/5341903487184',
-      order_number: 241114,
+      id: 5380452647120,
+      admin_graphql_api_id: 'gid://shopify/Order/5380452647120',
+      order_number: 241132,
       line_items: []  // Not actually using this for our test
     };
 
@@ -310,7 +310,7 @@ export async function GET() {
     
     const getOrderQuery = `
       query GetOrderDetails {
-        order(id: "gid://shopify/Order/5341903487184") {
+        order(id: "gid://shopify/Order/5380452647120") {
             id
             name
             createdAt
@@ -347,6 +347,67 @@ export async function GET() {
       );
     }
     
+    // Fetch the default variant for the product
+    console.log('Fetching product details...');
+    const getProductDefaultVariantQuery = `
+      query GetProductDefaultVariant {
+        product(id: "gid://shopify/Product/8294799933648") {
+          id
+          title
+          variants(first: 10) {
+            edges {
+              node {
+                id
+                title
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const productResponse = await fetch(graphqlEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
+      },
+      body: JSON.stringify({
+        query: getProductDefaultVariantQuery
+      })
+    });
+
+    if (!productResponse.ok) {
+      const statusText = await productResponse.text();
+      console.error(`HTTP error when fetching product: ${productResponse.status}, ${statusText}`);
+      throw new Error(`HTTP error! status: ${productResponse.status}, details: ${statusText}`);
+    }
+
+    const productResult = await productResponse.json();
+    console.log('Product details:', JSON.stringify(productResult, null, 2));
+
+    if (productResult.errors) {
+      console.error('Error fetching product:', productResult.errors);
+      return NextResponse.json(
+        { error: 'Failed to fetch product', details: productResult.errors },
+        { status: 500 }
+      );
+    }
+
+    // Extract the variant ID from the response
+    const variantId = productResult.data?.product?.variants?.edges[0]?.node?.id;
+    if (!variantId) {
+      console.error('No variant ID found in product response');
+      return NextResponse.json(
+        { error: 'Failed to get variant ID from product' },
+        { status: 500 }
+      );
+    }
+
+    // Override the OG_VARIANT_ID with the fetched variant ID
+    process.env.OG_VARIANT_ID = variantId;
+    console.log(`Using variant ID: ${variantId}`);
+    
     // Directly attempt to add the free item to the order
     console.log('Attempting to edit order...');
     const result = await addFreeItemToOrder(testOrder);
@@ -363,7 +424,8 @@ export async function GET() {
       { 
         success: true, 
         message: 'Free item added to order',
-        result 
+        //result,
+        product: productResult.data?.product
       },
       { status: 200 }
     );
