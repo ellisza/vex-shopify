@@ -303,66 +303,6 @@ async function addFreeItemToOrder(order: ShopifyOrder): Promise<AdminApiResponse
       throw new Error('No calculatedLineItem ID returned from orderEditAddVariant mutation');
     }
 
-    // Step 3: Get the line item ID for the newly added variant
-    const lineItemId = addVariantResult.data.orderEditAddVariant.calculatedLineItem.id;
-    console.log(`Added line item ID: ${lineItemId}`);
-
-    // Step 4: Add a 100% discount to make the item free
-    console.log('Adding 100% discount to make item free');
-    const addDiscountMutation = `
-      mutation orderEditAddLineItemDiscount($discount: OrderEditAppliedDiscountInput!, $id: ID!, $lineItemId: ID!) {
-        orderEditAddLineItemDiscount(
-          discount: $discount,
-          id: $id,
-          lineItemId: $lineItemId
-        ) {
-          calculatedLineItem {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const addDiscountResponse = await fetch(graphqlEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_KEY
-      },
-      body: JSON.stringify({
-        query: addDiscountMutation,
-        variables: {
-          id: calculatedOrderId,
-          lineItemId: lineItemId,
-          discount: {
-            description: "Free promotional item",
-            value: {
-              percentage: 100
-            }
-          }
-        }
-      })
-    });
-
-    if (!addDiscountResponse.ok) {
-      const statusText = await addDiscountResponse.text();
-      console.error(`HTTP error when adding discount: ${addDiscountResponse.status}, ${statusText}`);
-      throw new Error(`HTTP error! status: ${addDiscountResponse.status}, details: ${statusText}`);
-    }
-
-    const addDiscountResult = await addDiscountResponse.json();
-    console.log('Add discount response:', JSON.stringify(addDiscountResult, null, 2));
-
-    if (addDiscountResult.errors || (addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors && addDiscountResult.data.orderEditAddLineItemDiscount.userErrors.length > 0)) {
-      const errors = addDiscountResult.errors || addDiscountResult.data?.orderEditAddLineItemDiscount?.userErrors;
-      console.error('Error adding discount to line item:', JSON.stringify(errors));
-      throw new Error('Error adding discount to line item: ' + JSON.stringify(errors));
-    }
-
     // Step 5: Commit the changes to the order
     console.log('Committing order edit changes');
     const commitMutation = `
